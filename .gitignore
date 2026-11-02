@@ -1,0 +1,9 @@
+.venv/
+build/
+dist/
+radar_data/
+__pycache__/
+*.spec
+*.exe
+cube_tmpls.json
+game_ports.json
