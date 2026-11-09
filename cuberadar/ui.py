@@ -38,6 +38,7 @@ ORIENT_NAMES = ["0", "90°", "180°", "270°", "зеркало", "зеркало
 
 DEFAULTS = {
     "x": 80, "y": 200, "size": 260, "opacity": 0.8, "locked": False, "orient": 6,
+    "mode": "cube",                  # cube - кубы и ресурсы; bingo - рейдовое «бинго» (где сейв)
     "show_res": True, "sound_on": True, "sound": sound.DEFAULT, "volume": 70, "repeats": 2, "custom_sound": "",
 }
 
@@ -293,6 +294,23 @@ class RadarApp:
             f.pack(fill="x", padx=14, pady=2)
             return f
 
+        # --- режим ---
+        section("Режим")
+        r = row()
+        v_mode = tk.StringVar(value=self.st.get("mode", "cube"))
+
+        def on_mode():
+            self.st["mode"] = v_mode.get()
+            self.save()
+            self._draw(self.w.radar())
+        for val, text in (("cube", "Кубы"), ("bingo", "Бинго (рейд)")):
+            tk.Radiobutton(r, text=text, value=val, variable=v_mode, command=on_mode, bg=BG, fg=FG, selectcolor=PANEL,
+                           activebackground=BG, activeforeground=FG, font=("Segoe UI", 9, "bold"), indicatoron=False,
+                           padx=12, pady=3, relief="flat", bd=0, highlightthickness=0, cursor="hand2"
+                           ).pack(side="left", padx=(0, 6))
+        tk.Label(w, text="Бинго: за ~19 с до взрыва показывает, в какой клетке поля 6×6 белый квадрат-сейв.",
+                 wraplength=330, justify="left", bg=BG, fg=FAINT, font=("Segoe UI", 8)).pack(anchor="w", padx=14)
+
         # --- радар ---
         section("Радар")
         r = row()
@@ -515,6 +533,9 @@ class RadarApp:
         if not self.s.locked:
             self._text(c, c, "ищу игру…", MUTED, fs + 1)
             return
+        if self.st.get("mode") == "bingo":
+            self._draw_bingo(c, n, f, fs)
+            return
         me = r.get("me")
         if not me:
             self._text(c, c - 8, "позиция появится", MUTED, fs)
@@ -578,6 +599,30 @@ class RadarApp:
             no_key = r["keys"] == 0
             self._text(n - 5, n - 6, "нет ключа" if no_key else f"ключей {r['keys']}", RED if no_key and cubes_now else FAINT,
                        max(6, int(8 * f)), anchor="se", outline=False)
+
+    def _draw_bingo(self, c, n, f, fs):
+        """Режим «бинго»: крупно номер клетки сейва и поле, где сейв белый. Своя позиция не нужна."""
+        cv = self.cv
+        b = self.w.bingo_state(self.st["orient"], to_screen)
+        if not b:
+            cv.configure(highlightbackground=LINE)
+            self._text(c, c - 12 * max(f, .8), "БИНГО", MUTED, fs + 6, bold=True)
+            self._text(c, c + 10 * max(f, .8), "жду поле…", FAINT, fs + 1)
+            return
+        cv.configure(highlightbackground="#ffffff")
+        big = fs + 5
+        self._text(c, 34 * max(f, .8), f"{b['row']}-й сверху", "#ffffff", big, bold=True)
+        self._text(c, 34 * max(f, .8) + big * 1.6, f"{b['col']}-й слева", "#ffffff", big, bold=True)
+        cell = min(n * 0.55 / max(b["ncol"], 1), n * 0.42 / max(b["nrow"], 1))
+        gx0 = c - b["ncol"] * cell / 2
+        gy0 = 34 * max(f, .8) + big * 2.6
+        for rr in range(b["nrow"]):
+            for k in range(b["ncol"]):
+                safe = (rr + 1, k + 1) == (b["row"], b["col"])
+                cv.create_rectangle(gx0 + k * cell + 1, gy0 + rr * cell + 1, gx0 + (k + 1) * cell - 1, gy0 + (rr + 1) * cell - 1,
+                                    fill="#ffffff" if safe else "#5a1f1a", outline="#000")
+        tail = [f"взрыв через ~{b['left']} с"] + ([f"до сейва ~{b['dist']:.0f} м"] if b.get("dist") is not None else [])
+        self._text(c, gy0 + b["nrow"] * cell + fs + 2, " · ".join(tail), FG, fs, bold=True)
 
     # ---------- состояние ----------
     def _load(self) -> dict:

@@ -32,6 +32,12 @@ CUBE_KEY = 630900003      # Key: Hidden Cube (Bound)
 # Незнакомый шаблон, открытый ключом от куба, добавляется сюда сам (см. _learn_cube).
 CUBES = {1301199: "Скрытый куб", 1301200: "Скрытый куб"}
 
+# Рейдовое «бинго» (aion-economy kb/protocol.md, записи 2026-11-09/10): за ~19 с до взрыва сервер присылает в 4136
+# поле 6×6 квадратов с шагом 6 м: 35 штук 2920772 и ровно один сейв 2920771 в случайной клетке; 4236 - объект ушёл.
+OP_MOB_IN, OP_MOB_OUT = 0x4136, 0x4236
+BINGO_SAFE, BINGO_SQUARE = 2920771, 2920772
+BINGO_TTL = 45                    # поле живёт ~19 с; если ухода не увидели - убираем сами
+
 
 def _learned_path() -> str:
     import sys     # папка программы: рядом с exe или корень проекта (как netcap.app_dir, без scapy)
@@ -113,6 +119,7 @@ class CubeWatcher:
         self._tmpl13: dict[int, int] = {}  # eid -> шаблон объектов 13xxxxx: узнать новый вид куба при открытии ключом
         self.approx = False
         self.new_cubes = 0                # счётчик новых кубов: окно пищит, когда он растёт
+        self.bingo: dict[int, dict] = {}  # eid -> квадрат поля «бинго»
         self.live = True
         self._now = 0.0
         self.on_new_cube = None           # f(куб) - зовётся прямо из потока сниффера, без ожидания перерисовки
@@ -169,6 +176,7 @@ class CubeWatcher:
 
     def reset_view(self):
         self.objs.clear()
+        self.bingo.clear()
         now = self.now()
         for o in self.cubes.values():
             o["lost"] = now
@@ -194,6 +202,34 @@ class CubeWatcher:
             return {"me": {"x": me[0], "y": me[1], "z": me[2], "age": round(now - me[3], 1), "approx": self.approx,
                            "zage": round(now - self.fix[3], 1) if self.fix else None} if me else None,
                     "objs": objs, "range": RADAR_M, "keys": self.keys}
+
+    def bingo_state(self, orient: int, to_screen) -> dict | None:
+        """Где сейв на поле: ряд/столбец в ориентации радара (to_screen), считаются по самому полю - точно."""
+        with self.lock:
+            now = self.now()
+            for eid in [e for e, q in self.bingo.items() if now - q["seen"] > BINGO_TTL]:
+                self.bingo.pop(eid, None)
+            ms = list(self.bingo.values())
+            me = self.my_pos
+        safe = [m for m in ms if m["tmpl"] == BINGO_SAFE]
+        if not safe or len(ms) < 9:
+            return None
+        cx = sum(m["x"] for m in ms) / len(ms)
+        cy = sum(m["y"] for m in ms) / len(ms)
+        scr = [to_screen(m["x"] - cx, m["y"] - cy, orient) for m in ms]
+        s = safe[0]
+        sx, sy = to_screen(s["x"] - cx, s["y"] - cy, orient)
+
+        def rank(vals, v, tol=100):
+            uniq = []
+            for x in sorted(vals):
+                if not uniq or x - uniq[-1] > tol:
+                    uniq.append(x)
+            return sum(1 for u in uniq if u < v - tol) + 1, len(uniq)
+        col, ncol = rank([p[0] for p in scr], sx)
+        row, nrow = rank([p[1] for p in scr], sy)
+        d = dist(me, s) / 100 if me else None
+        return {"row": row, "col": col, "nrow": nrow, "ncol": ncol, "dist": d, "left": max(0, round(19 - (now - s["seen"])))}
 
     # ---------- пакеты ----------
     @staticmethod
@@ -221,6 +257,15 @@ class CubeWatcher:
         else:
             e, j0 = varint(body, 0)
             self.loc.feed(op, body, j0, e, ts, self.me)
+        if op == OP_MOB_IN:
+            eid, j = varint(body, 0)
+            if len(body) >= j + 21 and body[j + 8] == 0x02:
+                tmpl = struct.unpack_from("<I", body, j + 3)[0]
+                if tmpl in (BINGO_SAFE, BINGO_SQUARE):
+                    x, y, z = struct.unpack_from("<fff", body, j + 9)
+                    self.bingo[eid] = {"tmpl": tmpl, "x": x, "y": y, "z": z, "seen": ts}
+        elif op == OP_MOB_OUT:
+            self.bingo.pop(varint(body, 0)[0], None)
         if op == OP_APPEAR:
             self._appear(body, ts)
         elif op == OP_STATE:
