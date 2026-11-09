@@ -109,7 +109,10 @@ class Session:
         self.lock = threading.RLock()
         self.streams: dict[tuple, TcpStream] = {}
         self.op_counts = collections.Counter()
-        self.bad_ports: set = set()     # порты, которые оказались не игрой (проверка после захвата)
+        # порты, которые оказались не игрой: порт -> до какого времени не брать. Не навсегда: 07.11 порт ускорителя
+        # 1111 захватили, пока игра ещё грузилась (0% знакомых пакетов), он попал сюда, и до перезапуска приложения
+        # игра больше не находилась
+        self.bad_ports: dict = {}
         self.ops_at_lock = (0, 0)
         self.verified = False
         self.recent = collections.deque()
@@ -178,7 +181,7 @@ class Session:
             if str(ip.src).startswith("127.") and tcp.sport != 1111 and tcp.sport not in _known_ports():
                 return
             # https/http - не игра: 29.10 случайные байты обмена с сайтом цен (13.39.241.58:443) сошли за сигнатуру
-            if tcp.sport in WEB_PORTS or tcp.sport in self.bad_ports:
+            if tcp.sport in WEB_PORTS or self.bad_ports.get(tcp.sport, 0) > time.time():
                 return
             self.dev_sig[dev] += 1
             now = time.time()
@@ -444,9 +447,11 @@ class Capture:
                 if not self.port and now - getattr(self, "_conn_check", 0) > 10:
                     self._conn_check = now
                     try:
+                        # на 127.0.0.1 игра ходит только через ускоритель (1111) - прочие локальные порты не игра
                         ports = collections.Counter(rport for name, pid, local, rip, rport in netdiag.game_connections()
                                                     if not any(x in name.lower() for x in ("kina", "radar", "python"))
-                                                    and rport not in WEB_PORTS and rport not in s.bad_ports)
+                                                    and not (str(rip).startswith("127.") and rport != 1111)
+                                                    and rport not in WEB_PORTS and s.bad_ports.get(rport, 0) <= now)
                     except Exception:
                         ports = None
                     if ports:
@@ -463,7 +468,7 @@ class Capture:
                     share = (k1 - k0) / (t1 - t0)
                     if share < 0.05:   # в настоящем потоке знакомых опкодов ~20%, в чужом - почти 0
                         port = s.locked[1]
-                        s.bad_ports.add(port)
+                        s.bad_ports[port] = now + (30 if port == 1111 else 300)
                         _forget_port(port)
                         self.log(f"Порт {port} оказался не игрой (знакомых пакетов {share:.1%}) — ищу заново.")
                         self._widen()
